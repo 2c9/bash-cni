@@ -1,0 +1,73 @@
+#!/bin/bash
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec &>> /var/log/bash-cni-plugin.log
+
+stdin=$(cat /dev/stdin)
+subnet=$(echo "$stdin" | jq -r ".subnet")
+subnet_mask_size="${subnet##*/}"
+
+LOG_TEMPLATE=$(printf '{"CNI_COMMAND": "%s", "CNI_CONTAINERID": "%s", "CNI_IFNAME": "%s", "CNI_NETNS": "%s"}' $CNI_COMMAND $CNI_CONTAINERID $CNI_IFNAME $CNI_NETNS)
+
+case $CNI_COMMAND in
+ADD)
+    ipam=$(echo '{ "cniVersion": "0.3.1", "name": "example", "ipam": { "type": "host-local", "ranges": [ [{"subnet": "'${subnet}'"}]], "dataDir": "/tmp/test-cni"  } }' | $CNI_PATH/host-local ADD)
+    ip=$(echo "$ipam" | jq -r '.ips | .[] | select(.version=="4") | .address')
+
+    mkdir -p /var/run/netns/
+    ln -sfT $CNI_NETNS /var/run/netns/$CNI_CONTAINERID
+
+    random_uid=$(tr -dc 'a-f0-9' < /dev/urandom | head -c8)
+    host_ifname="veth_$random_uid"
+    tmp_ifname="eth0_$random_uid"
+
+    ip link add "${tmp_ifname}" type veth peer name "${host_ifname}"
+
+    ip link set $host_ifname up
+    ip r add "${ip%/*}/32" dev $host_ifname
+    sysctl net.ipv4.conf.$host_ifname.proxy_arp=1 &>/dev/null
+
+    ip link set "$tmp_ifname" netns $CNI_CONTAINERID
+    ip netns exec $CNI_CONTAINERID ip link set "${tmp_ifname}" name "${CNI_IFNAME}"
+    ip netns exec $CNI_CONTAINERID ip link set $CNI_IFNAME up
+    ip netns exec $CNI_CONTAINERID ip addr add $ip dev $CNI_IFNAME
+    ip netns exec $CNI_CONTAINERID ip route add 169.254.1.1/32 dev $CNI_IFNAME
+    ip netns exec $CNI_CONTAINERID ip route add default via 169.254.1.1
+
+    mac=$(ip netns exec $CNI_CONTAINERID ip link show eth0 | awk '/ether/ {print $2}')
+
+    rm /var/run/netns/$CNI_CONTAINERID
+
+    cni_result=$(printf '{"interfaces": [{"name": "%s", "mac": "%s", "sandbox": "%s"}]}' "$CNI_IFNAME" "$mac" "$CNI_NETNS")
+    echo $ipam | jq -c ". +=$cni_result" >&3
+
+    pod_name=$(echo "$CNI_ARGS" | sed -r 's/.*K8S_POD_NAME=([^;]+);?.*/\1/')
+    log_add=$(printf '{"ifname": "%s", "ip": "%s", "mac": "%s", "pod":"%s"}' "$host_ifname" "$ip" "$mac" "$pod_name")
+
+    mkdir -p /tmp/test-cni/containers
+    echo $log_add > /tmp/test-cni/containers/$CNI_CONTAINERID
+
+    echo $LOG_TEMPLATE | jq -r ". +=$log_add"
+;;
+DEL)
+    if [[ -e "/tmp/test-cni/containers/$CNI_CONTAINERID" ]]; then
+        ip_addr=$(cat /tmp/test-cni/containers/$CNI_CONTAINERID | jq -r '.ip')
+        ifname=$(cat /tmp/test-cni/containers/$CNI_CONTAINERID | jq -r '.ifname')
+        ip r del "${ip_addr%/*}" dev $ifname &>/dev/null
+        ip l del $ifname &>/dev/null
+        rm /tmp/test-cni/containers/$CNI_CONTAINERID
+    fi
+    export CNI_NETNS='/dev/null'
+    echo '{ "cniVersion": "0.3.1", "name": "example", "ipam": { "type": "host-local", "ranges": [ [{"subnet": "'${subnet}'"}]], "dataDir": "/tmp/test-cni"  } }' | $CNI_PATH/host-local DEL
+    echo $LOG_TEMPLATE | jq -c '.'
+    exit 0
+;;
+VERSION)
+    echo '{ "cniVersion": "0.3.1",  "supportedVersions": [ "0.3.0", "0.3.1", "0.4.0" ]  }' >&3
+    exit 0
+;;
+*)
+    echo "Unknown cni command: $CNI_COMMAND" 
+    exit 1
+;;
+esac

@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: routing
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: get-nodes-for-routing
+  namespace: kube-system
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: get-nodes-for-routing-bind
+  namespace: kube-system
+subjects:
+- kind: ServiceAccount
+  name: routing
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: get-nodes-for-routing
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frr-config
+  namespace: kube-system
+data:
+  daemons: |
+    bgpd=no
+    ospfd=yes
+    ospf6d=no
+    ripd=no
+    ripngd=no
+    isisd=no
+    pimd=no
+    pim6d=no
+    ldpd=no
+    nhrpd=no
+    eigrpd=no
+    babeld=no
+    sharpd=no
+    pbrd=no
+    bfdd=no
+    fabricd=no
+    vrrpd=no
+    pathd=no
+    vtysh_enable=yes
+    zebra_options="  -A 127.0.0.1 -s 90000000"
+    ospfd_options="  -A 127.0.0.1"
+    staticd_options="-A 127.0.0.1"
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: bash-cni
+  namespace: kube-system
+  labels:
+    k8s-app: bash-cni
+spec:
+  selector:
+    matchLabels:
+      k8s-app: bash-cni
+  template:
+    metadata:
+      labels:
+        k8s-app: bash-cni
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists   
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: routing
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 0
+      initContainers:
+        - name: install
+          imagePullPolicy: Always #IfNotPresent
+          image: kp11/frr-cni-install
+          env:
+          - name: HOST_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.hostIP
+          command:
+            - bash
+            - ./cni-startup.sh
+          volumeMounts:
+            # Used to configure FRR
+            - name: workdir
+              mountPath: "/etc/frr"
+            # Used to install CNI
+            - mountPath: /host/opt/cni/bin
+              name: cni-bin-dir
+            - mountPath: /host/etc/cni/net.d
+              name: cni-net-dir
+      containers:
+        - name:  frr
+          imagePullPolicy: IfNotPresent
+          image: frrouting/frr
+          securityContext:
+            capabilities:
+              add: [ "NET_BIND_SERVICE", "NET_ADMIN", "NET_RAW", "SYS_ADMIN" ]
+          volumeMounts:
+          - name: workdir
+            mountPath: "/etc/frr"
+          - name: config
+            mountPath: "/etc/frr/daemons"
+            subPath: daemons
+      volumes:
+        - name: config
+          configMap:
+            name: frr-config
+        # Used to configure FRR
+        - name: workdir
+          emptyDir: {}
+        # Used to install CNI
+        - name: cni-bin-dir
+          hostPath:
+            path: /opt/cni/bin
+        - name: cni-net-dir
+          hostPath:
+            path: /etc/cni/net.d
