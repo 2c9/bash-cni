@@ -29,34 +29,13 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
-  name: frr-config
+  name:  ospf-authentication-key
   namespace: kube-system
+type: Opaque
 data:
-  daemons: |
-    bgpd=no
-    ospfd=yes
-    ospf6d=no
-    ripd=no
-    ripngd=no
-    isisd=no
-    pimd=no
-    pim6d=no
-    ldpd=no
-    nhrpd=no
-    eigrpd=no
-    babeld=no
-    sharpd=no
-    pbrd=no
-    bfdd=no
-    fabricd=no
-    vrrpd=no
-    pathd=no
-    vtysh_enable=yes
-    zebra_options="  -A 127.0.0.1 -s 90000000"
-    ospfd_options="  -A 127.0.0.1"
-    staticd_options="-A 127.0.0.1"
+   authentication-key: dGVzdDEyMw==
 ---
 kind: DaemonSet
 apiVersion: apps/v1
@@ -88,13 +67,22 @@ spec:
       terminationGracePeriodSeconds: 0
       initContainers:
         - name: install
-          imagePullPolicy: Always #IfNotPresent
-          image: kp11/frr-cni-install
+          imagePullPolicy: Always
+          image: kp11/frr-cni-install:latest
+          # For nft rules we have to be privileged
+          securityContext:
+            privileged: true
           env:
           - name: HOST_IP
             valueFrom:
               fieldRef:
                 fieldPath: status.hostIP
+          - name: AUTHENTICATION_KEY
+            valueFrom:
+              secretKeyRef:
+                name: ospf-authentication-key
+                key: authentication-key
+                optional: false
           command:
             - bash
             - ./cni-startup.sh
@@ -117,13 +105,7 @@ spec:
           volumeMounts:
           - name: workdir
             mountPath: "/etc/frr"
-          - name: config
-            mountPath: "/etc/frr/daemons"
-            subPath: daemons
       volumes:
-        - name: config
-          configMap:
-            name: frr-config
         # Used to configure FRR
         - name: workdir
           emptyDir: {}

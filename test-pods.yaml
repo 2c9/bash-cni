@@ -1,0 +1,39 @@
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: test-pods
+  namespace: kube-system
+  labels:
+    k8s-app: test-pods
+spec:
+  selector:
+    matchLabels:
+      k8s-app: test-pods
+  template:
+    metadata:
+      labels:
+        k8s-app: test-pods
+    spec:
+      serviceAccountName: routing
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists   
+      terminationGracePeriodSeconds: 0
+      containers:
+      - name:  nettools
+        image: kp11/toolbox:latest
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "250m"
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        command:
+        - tail
+        - -f
+        - /dev/null
